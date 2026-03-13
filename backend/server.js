@@ -1,12 +1,16 @@
 const express = require("express");
 const cors = require("cors");
 const pool = require("./config/db");
+const patientsRoutes = require("./routes/patients.routes");
+const episodeRoutes = require("./routes/episodes.routes");
 
 const app = express();
 const PORT = 5000;
 
 app.use(cors());
 app.use(express.json());
+app.use("/api/patients", patientsRoutes);
+app.use("/api/episodes", episodeRoutes);
 
 app.get("/health", (req, res) => {
   res.status(200).json({ status: "ok" });

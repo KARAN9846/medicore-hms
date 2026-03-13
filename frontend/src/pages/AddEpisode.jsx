@@ -1,6 +1,8 @@
 import { useState, useEffect, useRef } from 'react'
-import { Link } from 'react-router-dom'
-import { MOCK_PATIENTS, MOCK_VISITS, BED_POOL, calcAgeFromDob } from '../utils/mockData.js'
+import { Link, useLocation, useSearchParams } from 'react-router-dom'
+import { MOCK_VISITS, BED_POOL, calcAgeFromDob } from '../utils/mockData.js'
+import { searchPatients } from '../api/patientsApi.js'
+import { createEpisode } from '../api/episodesApi.js'
 import { showToast } from '../utils/toast.js'
 
 /* ─── Page-scoped styles (mirrors the <style> block in add-episode.html) ─── */
@@ -59,6 +61,9 @@ let visitCounter = 48
 /* ─────────────────────────────────────────────────────────────── */
 
 export default function AddEpisode() {
+  const location = useLocation()
+  const [searchParams] = useSearchParams()
+  const loadedPatientRef = useRef(false)
 
   /* ── Search state ── */
   const [searchQuery,    setSearchQuery]    = useState('')
@@ -114,6 +119,18 @@ export default function AddEpisode() {
     setForm(prev => ({ ...prev, visitDate: dateStr, visitTime: `${hh}:${mm}` }))
   }, [])
 
+  useEffect(() => {
+    if (loadedPatientRef.current) return
+
+    const patientId = searchParams.get('patientId')
+    const patient = location.state?.patient
+
+    if (!patientId || !patient || String(patient.id) !== String(patientId)) return
+
+    loadedPatientRef.current = true
+    selectPatient(patient)
+  }, [location.state, searchParams])
+
   /* ── Bed pool update when ward changes ── */
   useEffect(() => {
     setAvailableBeds(bedWard && BED_POOL[bedWard] ? BED_POOL[bedWard] : [])
@@ -122,10 +139,7 @@ export default function AddEpisode() {
 
   useEffect(() => {
     const timer = setTimeout(() => {
-      const matches = getPatientMatches(searchQuery)
-      setSearchResults(matches)
-      setHighlightIndex(matches.length > 0 ? 0 : -1)
-      setSearchNotFound(searchQuery.trim() !== '' && matches.length === 0)
+      handleSearch(searchQuery)
     }, 300)
 
     return () => clearTimeout(timer)
@@ -140,29 +154,49 @@ export default function AddEpisode() {
     setBedWard(e.target.value)
   }
 
-  function getPatientMatches(query) {
-    const q = query.trim().toLowerCase()
-
-    if (!q) return []
-
-    return MOCK_PATIENTS.filter(p =>
-      `${p.firstName} ${p.lastName}`.toLowerCase().includes(q) ||
-      p.firstName.toLowerCase().includes(q) ||
-      p.lastName.toLowerCase().includes(q) ||
-      p.phone.toLowerCase().includes(q) ||
-      p.ehr.toLowerCase().includes(q)
-    )
-  }
-
   function handleSearchChange(e) {
     setSearchQuery(e.target.value)
+  }
+
+  async function runSearch(query = searchQuery) {
+    const q = query.trim()
+
+    if (!q) {
+      setSearchResults([])
+      setHighlightIndex(-1)
+      setSearchNotFound(false)
+      return
+    }
+
+    try {
+      const result = await searchPatients(q)
+      const matches = Array.isArray(result?.patients)
+        ? result.patients.map(patient => ({
+            id: patient.id,
+            ehr: patient.ehr_number,
+            firstName: patient.first_name,
+            lastName: patient.last_name,
+            dob: patient.dob,
+            phone: patient.mobile_number || '',
+            gender: patient.gender,
+          }))
+        : []
+
+      setSearchResults(matches)
+      setHighlightIndex(matches.length > 0 ? 0 : -1)
+      setSearchNotFound(matches.length === 0)
+    } catch (error) {
+      setSearchResults([])
+      setHighlightIndex(-1)
+      setSearchNotFound(false)
+    }
   }
 
   function handleSearchKeyDown(e) {
     if (searchResults.length === 0) {
       if (e.key === 'Enter') {
         e.preventDefault()
-        runSearch()
+        handleSearch()
       }
       return
     }
@@ -187,28 +221,8 @@ export default function AddEpisode() {
   }
 
   /* ─── SEARCH ─── */
-  function runSearch() {
-    const q = searchQuery.trim().toLowerCase()
-
-    if (!q) {
-      setSearchResults([])
-      setSearchNotFound(false)
-      setSelectedPatient(null)
-      setVisitEHR('')
-      setTotalVisitNo('')
-      setVisitNoStr('VIS-')
-      return
-    }
-
-    const matches = getPatientMatches(q)
-
-    setSearchResults(matches)
-    setHighlightIndex(matches.length > 0 ? 0 : -1)
-    setSearchNotFound(matches.length === 0)
-    setSelectedPatient(null)
-    setVisitEHR('')
-    setTotalVisitNo('')
-    setVisitNoStr('VIS-')
+  async function handleSearch(query = searchQuery) {
+    await runSearch(query)
   }
 
   function selectPatient(p) {
@@ -236,7 +250,7 @@ export default function AddEpisode() {
   }
 
   /* ─── Submit ─── */
-  function handleSubmit() {
+  async function handleSubmit() {
     const errors = []
     if (!selectedPatient) errors.push('Patient selection (search and select a patient)')
 
@@ -270,8 +284,28 @@ export default function AddEpisode() {
     }
 
     setValidationErrors([])
-    setSubmitted(true)
-    setTimeout(() => successRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' }), 50)
+
+    const payload = {
+      patient_id: selectedPatient?.id ?? null,
+      arrival_type: form.arrivalType,
+      funding_type: form.fundingType,
+      authorization_code: form.authCode || null,
+      visit_date: form.visitDate,
+      visit_time: form.visitTime,
+      clinician: form.clinician,
+      visit_type: form.visitType,
+      service_point: form.servicePoint,
+      ward_id: null,
+      bed_id: null,
+    }
+
+    try {
+      await createEpisode(payload)
+      setSubmitted(true)
+      setTimeout(() => successRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' }), 50)
+    } catch (error) {
+      setActionFeedback('Failed to submit episode. Please try again.')
+    }
   }
 
   function handleReset() {

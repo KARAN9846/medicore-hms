@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
-import { Link } from 'react-router-dom'
-import { MOCK_PATIENTS, calcAgeFromDob, generateEHR } from '../utils/mockData.js'
+import { Link, useNavigate } from 'react-router-dom'
+import { calcAgeFromDob, generateEHR } from '../utils/mockData.js'
+import { registerPatient, searchPatients } from '../api/patientsApi.js'
 
 /* Page-scoped styles — identical to the <style> block in register-patient.html */
 const PAGE_STYLES = `
@@ -46,6 +47,7 @@ const PAGE_STYLES = `
 let ehrCounterRef = 22
 
 export default function RegisterPatient() {
+  const navigate = useNavigate()
 
   /* ── Step indicator state ── */
   // 'idle' | 'active' | 'done'  for each of 6 steps
@@ -128,30 +130,45 @@ export default function RegisterPatient() {
     return (e) => setForm(prev => ({ ...prev, [field]: e.target.value }))
   }
 
-  function getPatientMatches(query) {
-    const q = query.trim().toLowerCase()
-
-    if (!q) return []
-
-    return MOCK_PATIENTS.filter(p => {
-      const fullName = `${p.firstName} ${p.lastName}`.toLowerCase()
-      return (
-        p.ehr.toLowerCase().includes(q) ||
-        p.phone.toLowerCase().includes(q) ||
-        p.firstName.toLowerCase().includes(q) ||
-        p.lastName.toLowerCase().includes(q) ||
-        fullName.includes(q)
-      )
-    })
-  }
-
   useEffect(() => {
     const timer = setTimeout(() => {
-      const matches = getPatientMatches(searchQuery)
+      handleSearch(searchQuery)
+    }, 300)
+
+    return () => clearTimeout(timer)
+  }, [searchQuery, generatedEHR])
+
+  /* ────────────────────────────────────────
+     STEP 1 — Search
+  ──────────────────────────────────────── */
+  async function handleSearch(query = searchQuery) {
+    const q = query.trim()
+
+    if (!q) {
+      setSuggestions([])
+      setHighlightIndex(-1)
+      setPatientNotFound(false)
+      return
+    }
+
+    try {
+      const result = await searchPatients(q)
+      const matches = Array.isArray(result?.patients)
+        ? result.patients.map(patient => ({
+            id: patient.id,
+            ehr: patient.ehr_number,
+            firstName: patient.first_name,
+            lastName: patient.last_name,
+            gender: patient.gender,
+            dob: patient.dob,
+            phone: patient.mobile_number || '',
+          }))
+        : []
+
       setSuggestions(matches)
       setHighlightIndex(matches.length > 0 ? 0 : -1)
 
-      if (searchQuery.trim() && matches.length === 0) {
+      if (matches.length === 0) {
         setPatientNotFound(true)
         setSelectedPatient(null)
         setActionFeedback('')
@@ -164,27 +181,11 @@ export default function RegisterPatient() {
       } else {
         setPatientNotFound(false)
       }
-    }, 300)
-
-    return () => clearTimeout(timer)
-  }, [searchQuery, generatedEHR])
-
-  /* ────────────────────────────────────────
-     STEP 1 — Search
-  ──────────────────────────────────────── */
-  function runSearch() {
-    const q = searchQuery.trim().toLowerCase()
-
-    if (!q) {
+    } catch (error) {
       setSuggestions([])
       setHighlightIndex(-1)
       setPatientNotFound(false)
-      return
     }
-
-    const matches = getPatientMatches(q)
-    setSuggestions(matches)
-    setHighlightIndex(matches.length > 0 ? 0 : -1)
   }
 
   function openNewPatientFlow() {
@@ -210,7 +211,7 @@ export default function RegisterPatient() {
     if (suggestions.length === 0) {
       if (e.key === 'Enter') {
         e.preventDefault()
-        runSearch()
+        handleSearch()
       }
       return
     }
@@ -234,7 +235,13 @@ export default function RegisterPatient() {
     }
   }
 
-  function confirmExistingPatient(ehr, name) {
+  function confirmExistingPatient(patient) {
+    navigate(`/add-episode?patientId=${patient.id}`, {
+      state: { patient },
+    })
+  }
+
+  function confirmExistingPatientPlaceholder(ehr, name) {
     setActionFeedback(`Opening existing record for ${name} (${ehr}) — feature coming soon.`)
   }
 
@@ -267,7 +274,7 @@ export default function RegisterPatient() {
   /* ────────────────────────────────────────
      Submit
   ──────────────────────────────────────── */
-  function handleSubmit() {
+  async function handleSubmit() {
     const errors = []
     const req = (val, label) => { if (!val.trim()) errors.push(label) }
 
@@ -300,6 +307,34 @@ export default function RegisterPatient() {
     }
 
     setValidationErrors([])
+
+    const payload = {
+      patient: {
+        category: form.category,
+        first_name: form.firstName,
+        last_name: form.lastName,
+        gender: form.gender,
+        dob: form.dob,
+      },
+      contact: {
+        mobile_number: form.mobile,
+        email: form.email,
+        phone_number: form.altNumber,
+      },
+      address: {
+        address_line: form.address,
+        suburb: form.suburb,
+        city: form.city,
+        area_code: form.areaCode,
+      },
+    }
+
+    try {
+      await registerPatient(payload)
+    } catch (error) {
+      setActionFeedback('Failed to register patient. Please try again.')
+      return
+    }
 
     const chips = [
       { icon: 'bi-person',           text: `${form.firstName} ${form.lastName}` },
@@ -503,7 +538,7 @@ export default function RegisterPatient() {
                     onKeyDown={handleSearchKeyDown}
                   />
                 </div>
-                <button type="button" className="btn btn-primary btn-sm px-3 fw-semibold" onClick={runSearch}>
+                <button type="button" className="btn btn-primary btn-sm px-3 fw-semibold" onClick={() => handleSearch()}>
                   <i className="bi bi-search me-1"></i>Search
                 </button>
               </div>
@@ -556,7 +591,7 @@ export default function RegisterPatient() {
                     <button
                       type="button"
                       className="btn btn-outline-primary btn-sm"
-                      onClick={() => confirmExistingPatient(selectedPatient.ehr, `${selectedPatient.firstName} ${selectedPatient.lastName}`)}
+                      onClick={() => confirmExistingPatient(selectedPatient)}
                     >
                       <i className="bi bi-arrow-right me-1"></i>Open Record
                     </button>
